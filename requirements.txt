@@ -4,6 +4,6 @@ requests
 beautifulsoup4
 APScheduler
 pytz
-google-generativeai
+google-genai
 Pillow
 aiohttp
