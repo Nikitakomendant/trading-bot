@@ -1,0 +1,9 @@
+python-telegram-bot
+feedparser
+requests
+beautifulsoup4
+APScheduler
+pytz
+google-generativeai
+Pillow
+aiohttp
