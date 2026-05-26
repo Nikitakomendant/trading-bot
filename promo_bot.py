@@ -1,16 +1,24 @@
-# -*- coding: utf-8 -*-
-
 import logging
 import re
 from datetime import datetime
 import pytz
 from telegram import Update
 from telegram.ext import (
-    CommandHandler, MessageHandler, ConversationHandler, filters, ContextTypes, Application
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ConversationHandler, filters, ContextTypes
 )
 
 import promo_manager
-from config import CHANNEL_ID, TIMEZONE
+from config import TELEGRAM_TOKEN, CHANNEL_ID, TIMEZONE
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+# Отключаем спам в консоли от фоновых процессов
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -32,172 +40,215 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text)
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отменяет текущую операцию добавления рекламы."""
-    await update.message.reply_text("❌ Действие отменено.")
-    return ConversationHandler.END
+
+# --- Логика добавления промо (/add) ---
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало процесса добавления рекламы."""
+    """Начинает диалог добавления рекламного поста."""
     await update.message.reply_text(
-        "📝 Перешли мне или отправь рекламный пост.\n"
-        "Это может быть текст или ОДНО фото с подписью. "
-        "В посте будет сохранено всё форматирование (жирный, ссылки и т.д.)."
+        "📝 Отправь мне рекламный пост (это может быть текст, или картинка с текстом).\n"
+        "Я сохраню его форматирование."
     )
     return WAIT_POST
 
 async def add_receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получает пост (текст или фото) и сохраняет его временные данные."""
-    if update.message.photo:
-        context.user_data['photo_id'] = update.message.photo[-1].file_id
-        context.user_data['content_html'] = update.message.caption_html or ""
-    elif update.message.text:
-        context.user_data['photo_id'] = None
-        context.user_data['content_html'] = update.message.text_html
+    """Получает рекламный пост от пользователя."""
+    message = update.message
+    
+    content_html = ""
+    photo_id = None
+    
+    if message.photo:
+        photo_id = message.photo[-1].file_id # Берем фото наилучшего качества
+        content_html = message.caption_html or ""
     else:
-        await update.message.reply_text("⚠️ Пожалуйста, отправь текст или фото с описанием.")
+        content_html = message.text_html or ""
+        
+    if not content_html and not photo_id:
+        await update.message.reply_text("Пожалуйста, отправь текст или фото.")
         return WAIT_POST
-
+        
+    context.user_data['promo_html'] = content_html
+    context.user_data['promo_photo'] = photo_id
+    
     await update.message.reply_text(
-        "📅 Введи дату публикации в формате DD.MM.YYYY (например, 25.12.2024)\n"
-        "Или напиши слово: everyday (если пост должен выходить каждый день)."
+        "✅ Пост получен.\n\n"
+        "📅 Напиши дату публикации в формате `ДД.ММ.ГГГГ` (например, `25.05.2026`).\n"
+        "Или напиши слово `каждый день`, если пост должен выходить ежедневно.",
+        parse_mode="Markdown"
     )
     return WAIT_DATE
 
 async def add_receive_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получает дату публикации."""
     text = update.message.text.strip().lower()
-    if text != 'everyday':
-        if not re.match(r'^\d{2}\.\d{2}\.\d{4}$', text):
-            await update.message.reply_text("⚠️ Неверный формат даты! Используй DD.MM.YYYY или напиши everyday.")
+    
+    if text in ["каждый день", "everyday", "ежедневно"]:
+        context.user_data['promo_date'] = "everyday"
+    else:
+        # Базовая проверка формата ДД.ММ.ГГГГ
+        if not re.match(r"\d{2}\.\d{2}\.\d{4}", text):
+            await update.message.reply_text("Неверный формат даты. Пожалуйста, используй формат ДД.ММ.ГГГГ (например, 25.05.2026) или напиши 'каждый день'.")
             return WAIT_DATE
-
-    context.user_data['date'] = text
-    await update.message.reply_text("⏰ Введи время публикации в формате HH:MM (например, 14:30 или 09:15):")
+        context.user_data['promo_date'] = text
+        
+    await update.message.reply_text(
+        "⏰ Напиши время публикации по Киеву в формате `ЧЧ:ММ` (например, `14:30`).",
+        parse_mode="Markdown"
+    )
     return WAIT_TIME
 
 async def add_receive_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получает время публикации."""
     text = update.message.text.strip()
-    if not re.match(r'^\d{2}:\d{2}$', text):
-        await update.message.reply_text("⚠️ Неверный формат времени! Используй HH:MM (например, 18:00).")
+    
+    if not re.match(r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$", text):
+        await update.message.reply_text("Неверный формат времени. Пожалуйста, используй ЧЧ:ММ (например, 14:30 или 09:15).")
         return WAIT_TIME
-
-    context.user_data['time'] = text
-    await update.message.reply_text("🔢 Сколько раз нужно опубликовать этот пост? (Введи число от 1 до 100):")
+        
+    context.user_data['promo_time'] = text
+    
+    await update.message.reply_text(
+        "🔢 Сколько раз публиковать этот пост?\n"
+        "Напиши число (например, `1` если только один раз, или `5` если пять раз подряд по заданному расписанию)."
+    )
     return WAIT_COUNT
 
 async def add_receive_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получает количество показов и сохраняет рекламу."""
+    """Получает количество публикаций и сохраняет рекламу."""
     text = update.message.text.strip()
-    try:
-        count = int(text)
-        if count <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("⚠️ Введи корректное число больше нуля.")
+    
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("Пожалуйста, введи положительное число.")
         return WAIT_COUNT
-
-    # Сохраняем через менеджер
+        
+    count = int(text)
+    
+    # Сохраняем в базу
     promo_id = promo_manager.add_promo(
-        content_html=context.user_data['content_html'],
-        photo_id=context.user_data['photo_id'],
-        publish_time=context.user_data['time'],
-        publish_date=context.user_data['date'],
+        content_html=context.user_data['promo_html'],
+        photo_id=context.user_data['promo_photo'],
+        publish_time=context.user_data['promo_time'],
+        publish_date=context.user_data['promo_date'],
         remaining_count=count
     )
-
+    
+    date_str = "каждый день" if context.user_data['promo_date'] == "everyday" else context.user_data['promo_date']
+    
     await update.message.reply_text(
-        f"✅ Рекламный пост успешно запланирован!\n"
-        f"🆔 ID поста: `{promo_id}`\n"
-        f"📅 Дата: {context.user_data['date']}\n"
-        f"⏰ Время: {context.user_data['time']}\n"
-        f"🔄 Количество публикаций: {count}"
+        f"🎉 **Реклама успешно запланирована!**\n\n"
+        f"🆔 ID: `{promo_id}`\n"
+        f"📅 День: {date_str}\n"
+        f"⏰ Время: {context.user_data['promo_time']}\n"
+        f"🔄 Осталось публикаций: {count}",
+        parse_mode="Markdown"
     )
+    
+    # Очищаем временные данные
     context.user_data.clear()
     return ConversationHandler.END
 
-async def list_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выводит список всех активных рекламных постов."""
-    promos = promo_manager.load_promos()
-    if not promos:
-        await update.message.reply_text("📭 Список запланированной рекламы пуст.")
-        return
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет процесс создания рекламы."""
+    context.user_data.clear()
+    await update.message.reply_text("Действие отменено.")
+    return ConversationHandler.END
 
-    response = "📋 **Список запланированной рекламы:**\n\n"
-    for p in promos:
-        type_str = "📸 Фото+Текст" if p['photo_id'] else "📝 Текст"
-        date_str = "Каждый день" if p['date'] == 'everyday' else p['date']
-        response += (
-            f"🆔 ID: `{p['id']}` | {type_str}\n"
+
+# --- Управление списком реклам (/list, /del) ---
+
+async def list_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выводит список всех запланированных реклам."""
+    promos = promo_manager.load_promos()
+    
+    if not promos:
+        await update.message.reply_text("📭 База рекламных постов пуста.")
+        return
+        
+    text = "📋 **Запланированные рекламные посты:**\n\n"
+    for i, p in enumerate(promos, 1):
+        date_str = "Каждый день" if p['date'] == "everyday" else p['date']
+        
+        # Делаем превью текста (первые 30 символов) без HTML тегов
+        preview = re.sub(r'<[^>]+>', '', p['content_html'])[:30]
+        if len(preview) == 30: preview += "..."
+        if not preview and p['photo_id']: preview = "[Только картинка]"
+        
+        text += (
+            f"🔹 **ID:** `{p['id']}`\n"
             f"📅 Когда: {date_str} в {p['time']}\n"
-            f"🔄 Осталось показов: {p['remaining']}\n"
-            f"-----------------------------------\n"
+            f"🔄 Осталось раз: {p['remaining']}\n"
+            f"📝 Текст: {preview}\n"
+            f"🖼 Фото: {'Да' if p['photo_id'] else 'Нет'}\n"
+            f"🗑 Удалить: `/del {p['id']}`\n\n"
         )
-    await update.message.reply_text(response, parse_mode="Markdown")
+        
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 
 async def del_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет рекламный пост по ID."""
+    """Удаляет рекламу по ID."""
     if not context.args:
-        await update.message.reply_text("⚠️ Использование: /del <ID_поста>")
+        await update.message.reply_text("Укажи ID поста для удаления. Пример: `/del 1234abcd`", parse_mode="Markdown")
         return
-
-    promo_id = context.args[0].strip()
-    if promo_manager.remove_promo(promo_id):
-        await update.message.reply_text(f"🗑 Рекламный пост `{promo_id}` успешно удален.")
+        
+    promo_id = context.args[0]
+    success = promo_manager.remove_promo(promo_id)
+    
+    if success:
+        await update.message.reply_text(f"✅ Пост с ID `{promo_id}` успешно удален.", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ Пост с ID `{promo_id}` не найден.")
+        await update.message.reply_text(f"❌ Пост с ID `{promo_id}` не найден.", parse_mode="Markdown")
 
-# --- Фоновая задача проверки рекламы ---
+
+# --- Фоновая задача публикации ---
 
 async def check_and_publish_promos(context: ContextTypes.DEFAULT_TYPE):
-    """Регулярная задача (раз в минуту) для проверки и публикации рекламы."""
+    """Функция вызывается каждую минуту. Проверяет, пора ли публиковать рекламу."""
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
     
-    current_time = now.strftime("%H:%M")
-    current_date = now.strftime("%d.%m.%Y")
-
-    active_promos = promo_manager.load_promos()
-    if not active_promos:
-        return
-
-    for p in active_promos:
-        if p['remaining'] <= 0:
-            continue
-
+    current_time_str = now.strftime("%H:%M")
+    current_date_str = now.strftime("%d.%m.%Y")
+    
+    promos = promo_manager.load_promos()
+    
+    for p in promos:
         # Проверяем время
-        if p['time'] == current_time:
-            # Проверяем дату (конкретный день или ежедневно)
-            if p['date'] == 'everyday' or p['date'] == current_date:
-                logger.info(f"⏰ Наступило время публикации рекламы {p['id']}")
-                
+        if p["time"] == current_time_str:
+            # Проверяем дату
+            if p["date"] == "everyday" or p["date"] == current_date_str:
+                logger.info(f"Пришло время публиковать рекламу {p['id']}")
                 try:
-                    if p['photo_id']:
+                    # Публикуем
+                    if p["photo_id"]:
                         await context.bot.send_photo(
                             chat_id=CHANNEL_ID,
-                            photo=p['photo_id'],
-                            caption=p['content_html'],
+                            photo=p["photo_id"],
+                            caption=p["content_html"],
                             parse_mode="HTML"
                         )
                     else:
                         await context.bot.send_message(
                             chat_id=CHANNEL_ID,
-                            text=p['content_html'],
+                            text=p["content_html"],
                             parse_mode="HTML"
                         )
                     
-                    # Уменьшаем счетчик показов
-                    p['remaining'] -= 1
-                    promo_manager.save_promos(active_promos)
+                    # Уменьшаем счетчик
+                    promo_manager.decrement_promo(p["id"])
                     logger.info(f"Реклама {p['id']} успешно опубликована.")
                 except Exception as e:
                     logger.error(f"Ошибка при публикации рекламы {p['id']}: {e}")
 
-# --- Инициализация обработчиков в основном приложении ---
+# --- Главная функция запуска ---
 
-def setup_promo_bot(application: Application):
-    """Регистрирует команды промо-бота в едином общем приложении."""
+def main():
+    logger.info("Запуск интерактивного бота для рекламы...")
+    
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Добавляем ConversationHandler для добавления рекламы
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('add', add_start)],
         states={
@@ -214,8 +265,12 @@ def setup_promo_bot(application: Application):
     application.add_handler(CommandHandler("del", del_promo))
     application.add_handler(conv_handler)
     
-    # Подключаем фоновое повторение задач проверки рекламы в JobQueue общего бота
-    if application.job_queue:
-        application.job_queue.run_repeating(check_and_publish_promos, interval=60, first=10)
-        
-    logger.info("Рекламные обработчики команд успешно внедрены в основного бота.")
+    # Запускаем фоновую задачу раз в минуту
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_and_publish_promos, interval=60, first=10)
+    
+    # Запускаем polling (бесконечный цикл получения сообщений)
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()

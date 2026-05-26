@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 
+# ---------------------------------------------------------------------------
+#                         ОСНОВНОЙ УПРАВЛЯЮЩИЙ ФАЙЛ
+# ---------------------------------------------------------------------------
+# Это точка входа в приложение. Он инициализирует все компоненты,
+# настраивает планировщик и запускает основной цикл работы бота.
+# ---------------------------------------------------------------------------
+
 import asyncio
 import logging
 import random
@@ -7,10 +14,10 @@ import re
 import io
 import os
 import sys
+import subprocess
 import requests
 from aiohttp import web
-from telegram import InputFile
-from telegram.ext import Application
+from telegram import Bot, InputFile
 from telegram.error import TelegramError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
@@ -22,9 +29,9 @@ from config import (
 )
 import data_fetcher
 import ai_content_processor
-from promo_bot import setup_promo_bot  # Импортируем функцию связки рекламного бота
 
 # --- Настройка системы логирования ---
+# Логи будут выводиться и в консоль, и в файл (если нужно будет добавить FileHandler)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,12 +39,14 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+# Приглушаем слишком "болтливые" логгеры от сторонних библиотек
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# Инициализируем планировщик
+# --- Инициализация основных компонентов ---
+bot = Bot(token=TELEGRAM_TOKEN)
 scheduler = AsyncIOScheduler(timezone=timezone(TIMEZONE))
 
 
@@ -61,11 +70,18 @@ async def start_web_server():
 
 def convert_to_html_safely(text: str) -> str:
     """Конвертирует базовый Markdown (жирный, курсив) в HTML для Telegram."""
+    # Экранируем спецсимволы HTML
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    # Преобразуем жирный шрифт (сначала двойные звездочки и подчеркивания)
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'__(.*?)__', r'<b>\1</b>', text, flags=re.DOTALL)
+    
+    # Преобразуем курсив (одинарные звездочки и подчеркивания, если они еще остались)
+    # Используем word boundaries, чтобы не сломать что-то внутри слов
     text = re.sub(r'\b_([^_]+)_\b', r'<i>\1</i>', text)
     text = re.sub(r'\*([^\*]+)\*', r'<i>\1</i>', text)
+    
     return text
 
 
@@ -74,6 +90,7 @@ def split_html_text(text: str, limit: int) -> tuple[str, str]:
     if len(text) <= limit:
         return text, ""
     
+    # Ищем лучшее место для разрыва (абзац, конец строки, пробел)
     split_pos = text.rfind('\n\n', 0, limit)
     if split_pos == -1 or split_pos < limit * 0.7:
         split_pos = text.rfind('\n', 0, limit)
@@ -85,6 +102,7 @@ def split_html_text(text: str, limit: int) -> tuple[str, str]:
     part1 = text[:split_pos].strip()
     part2 = text[split_pos:].strip()
     
+    # Балансируем теги, если разрыв произошел внутри <b> или <i>
     open_b = part1.count('<b>') - part1.count('</b>')
     open_i = part1.count('<i>') - part1.count('</i>')
     
@@ -122,15 +140,13 @@ def _build_input_file_from_url(url: str) -> InputFile | None:
         return None
 
 
-# Переменная для хранения ссылки на объект бота для планировщика задач
-bot_instance = None
-
 async def send_to_telegram(post_text: str, image_url: str | None):
-    """Отправляет финальный пост в Telegram-канал."""
-    if not bot_instance:
-        logger.error("Экземпляр бота не инициализирован.")
-        return
-
+    """
+    Отправляет финальный пост в Telegram-канал.
+    Если текст слишком длинный для подписи к фото (1024), он разбивается на два сообщения:
+    1. Фото + первая часть текста
+    2. Только текст (вторая часть) с ссылкой на канал
+    """
     html_text = convert_to_html_safely(post_text)
     link_html = f"\n\n<a href='{CHANNEL_LINK}'>DEVILS TRADERS COMMUNITY</a>"
     
@@ -139,8 +155,12 @@ async def send_to_telegram(post_text: str, image_url: str | None):
 
     if image_url:
         caption = html_text
+        
+        # Если текст слишком длинный для подписи (лимит 1024), разбиваем его
         if len(caption) + len(link_html) > 1024:
+            # Разбиваем текст так, чтобы первая часть была <= 1024, а остаток шел во вторую
             caption, part2_text = split_html_text(html_text, 1024 - len(link_html) - 10) 
+            # Добавляем ссылку на канал во вторую часть, если она есть
             if part2_text:
                 logger.info("Текст слишком длинный, разбиваю на 2 поста (фото+текст и только текст).")
             else:
@@ -149,7 +169,7 @@ async def send_to_telegram(post_text: str, image_url: str | None):
             caption += link_html
 
         try:
-            await bot_instance.send_photo(
+            await bot.send_photo(
                 chat_id=CHANNEL_ID,
                 photo=image_url,
                 caption=caption,
@@ -162,7 +182,7 @@ async def send_to_telegram(post_text: str, image_url: str | None):
             try:
                 input_file = _build_input_file_from_url(image_url)
                 if input_file:
-                    await bot_instance.send_photo(
+                    await bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=input_file,
                         caption=caption,
@@ -174,11 +194,14 @@ async def send_to_telegram(post_text: str, image_url: str | None):
                     raise TelegramError("Не удалось подготовить файл изображения.")
             except TelegramError as e2:
                 logger.error(f"Ошибка при отправке файла изображения: {e2}. Буду отправлять как текст.")
+        except Exception as e:
+            logger.error(f"Неизвестная ошибка при отправке фото {image_url}: {e}.")
 
+        # Если фото успешно отправлено, и есть вторая часть текста, отправляем её
         if photo_sent and part2_text:
             part2_text += link_html
             try:
-                await bot_instance.send_message(
+                await bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=part2_text,
                     parse_mode="HTML",
@@ -187,19 +210,21 @@ async def send_to_telegram(post_text: str, image_url: str | None):
                 logger.info("Вторая часть (продолжение текста) успешно отправлена.")
             except TelegramError as e:
                 logger.error(f"Ошибка при отправке второй части текста: {e}")
-            return
+            return # Мы закончили, так как отправили и фото, и (если было) продолжение
 
+    # Если отправка с фото не удалась или фото изначально не было (отправляем только текст)
     if not photo_sent:
         full_text = html_text + link_html
         try:
+            # Лимит обычного текстового сообщения - 4096 символов
             if len(full_text) > 4096:
                 part1, part2 = split_html_text(html_text, 4096 - len(link_html) - 10)
-                await bot_instance.send_message(chat_id=CHANNEL_ID, text=part1, parse_mode="HTML", disable_web_page_preview=True)
+                await bot.send_message(chat_id=CHANNEL_ID, text=part1, parse_mode="HTML", disable_web_page_preview=True)
                 part2 += link_html
-                await bot_instance.send_message(chat_id=CHANNEL_ID, text=part2, parse_mode="HTML", disable_web_page_preview=True)
+                await bot.send_message(chat_id=CHANNEL_ID, text=part2, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info("Текст без фото был слишком длинным и разделен на два текстовых сообщения.")
             else:
-                await bot_instance.send_message(
+                await bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=full_text,
                     parse_mode="HTML",
@@ -210,7 +235,7 @@ async def send_to_telegram(post_text: str, image_url: str | None):
             logger.error(f"Ошибка Telegram API при отправке текста с HTML: {e}. Пробую без разметки.")
             try:
                 plain_text = (post_text + f"\n\nDEVILS TRADERS COMMUNITY: {CHANNEL_LINK}")[:4090]
-                await bot_instance.send_message(
+                await bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=plain_text,
                     parse_mode=None,
@@ -222,104 +247,127 @@ async def send_to_telegram(post_text: str, image_url: str | None):
 
 
 async def process_and_post_news():
-    """Основной рабочий цикл: от поиска новости до ее публикации."""
+    """
+    Основной рабочий цикл: от поиска новости до ее публикации.
+    """
     logger.info("--- Запуск нового цикла обработки новости ---")
     try:
+        # 1. Получаем ссылку на последнюю неопубликованную новость (+ описание из RSS)
         title, article_url, rss_summary = data_fetcher.get_latest_news_from_rss()
         if not article_url:
             logger.info("Новых статей для публикации не найдено. Цикл завершен.")
             return
 
+        # 2. Скрапим контент со страницы статьи
         scraped_data = data_fetcher.scrape_article_content(article_url)
 
+        # Определяем текст для генерации: скрапинг → RSS summary → заголовок
         article_text = ""
         if scraped_data and scraped_data.get("raw_text"):
             article_text = scraped_data["raw_text"]
 
+        # Если скрапинг дал мало текста, дополняем из RSS
         if len(article_text.strip()) < 200 and rss_summary:
-            logger.info(f"Скрапинг дал мало текста. Дополняю из RSS.")
+            logger.info(
+                f"Скрапинг дал мало текста ({len(article_text.strip())} символов). "
+                f"Дополняю из RSS описания ({len(rss_summary)} символов)."
+            )
+            # Комбинируем: если есть хоть какой-то текст со скрапинга — добавляем RSS
             if article_text.strip():
                 article_text = article_text.strip() + " " + rss_summary
             else:
                 article_text = rss_summary
 
+        # Последний fallback: используем заголовок статьи
         if len(article_text.strip()) < 50 and title:
-            logger.warning("Текст статьи слишком короткий. Использую заголовок.")
+            logger.warning("Текст статьи слишком короткий даже с RSS. Использую заголовок как fallback.")
             article_text = title
 
         if not article_text or len(article_text.strip()) < 50:
             logger.error(f"Не удалось получить достаточно контента для статьи: {article_url}")
             return
 
+        logger.info(f"Итоговый текст для генерации: {len(article_text.strip())} символов.")
+
+        # 3. Генерируем текст поста с помощью ИИ
         generated_post = ai_content_processor.generate_news_post(article_text)
         if not generated_post:
             logger.error("Не удалось сгенерировать текст поста. Публикация отменена.")
             return
 
+        # 4. Выбираем лучшее изображение с помощью ИИ
         best_image_url = None
         if scraped_data and scraped_data.get("image_urls"):
             best_image_url = ai_content_processor.select_best_image(
                 image_urls=scraped_data["image_urls"],
                 post_text=generated_post
             )
+        else:
+            logger.info("В статье не найдено изображений для анализа.")
 
+        # 5. Отправляем готовый пост в Telegram
         await send_to_telegram(post_text=generated_post, image_url=best_image_url)
 
     except Exception as e:
         logger.critical(f"Произошла непредвиденная ошибка в главном цикле: {e}", exc_info=True)
 
 
-async def on_bot_start(application: Application):
+async def main():
     """
-    Эта функция автоматически вызывается библиотека python-telegram-bot СРАЗУ ПОСЛЕ того,
-    как инициализируется внутренний цикл событий (event loop).
-    Здесь безопасно запускать планировщики и веб-серверы.
+    Главная асинхронная функция, которая настраивает и запускает планировщик.
     """
-    # Запускаем веб-сервер
+    logger.info("🤖 Запуск Telegram-бота...")
+
+    # --- Запуск веб-сервера для Render ---
     await start_web_server()
 
-    # --- Настройка расписания постов через APScheduler ---
+    # --- Настройка расписания ---
     total_minutes_in_range = (END_HOUR - START_HOUR) * 60
-    interval_minutes = total_minutes_in_range // POSTS_PER_DAY if POSTS_PER_DAY > 0 else total_minutes_in_range + 1
+    # Предотвращение деления на ноль, если постов 0
+    if POSTS_PER_DAY > 0:
+        interval_minutes = total_minutes_in_range // POSTS_PER_DAY
+    else:
+        interval_minutes = total_minutes_in_range + 1
 
     for i in range(POSTS_PER_DAY):
+        # Выбираем случайное время внутри каждого интервала, чтобы посты не выходили в одно и то же время
         random_offset = random.randint(0, max(0, interval_minutes - 1))
         scheduled_minute_abs = (i * interval_minutes) + random_offset
+
         scheduled_hour = START_HOUR + scheduled_minute_abs // 60
         scheduled_minute = scheduled_minute_abs % 60
 
         scheduler.add_job(process_and_post_news, "cron", hour=scheduled_hour, minute=scheduled_minute)
         logger.info(f"Запланирована публикация на {scheduled_hour:02d}:{scheduled_minute:02d}")
 
-    # Теперь ошибки не будет, так как цикл событий уже гарантированно запущен!
     scheduler.start()
 
-    # Запускаем один пост сразу при старте
-    asyncio.create_task(process_and_post_news())
+    # --- Запуск первого поста сразу после старта ---
+    logger.info("Запускаю немедленную публикацию первого поста...")
+    await process_and_post_news()
 
-
-def main():
-    """Инициализация единого бота и старт опроса."""
-    global bot_instance
-    logger.info("🤖 Инициализация объединенного Telegram-бота...")
-
-    # Создаем ОДНО общее приложение бота. 
-    # Через post_init передаем функцию, которая выполнится внутри рабочего Event Loop.
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(on_bot_start).build()
-    bot_instance = application.bot
-
-    # Внедряем команды интерактивного промо-бота в это же приложение
-    setup_promo_bot(application)
-
-    # Запуск polling. Бот слушает команды и выполняет фоновые задачи рекламы.
-    logger.info("Бот полностью готов и запускает опрос серверов Telegram (Polling)...")
-    application.run_polling()
+    # --- Бесконечный цикл для поддержания работы бота ---
+    logger.info("Бот запущен и работает в штатном режиме.")
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
+    promo_process = None
     try:
-        main()
+        # Запускаем интерактивного рекламного бота как отдельный фоновый процесс
+        logger.info("⚡️ Запуск фонового процесса promo_bot.py...")
+        promo_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "promo_bot.py")
+        promo_process = subprocess.Popen([sys.executable, promo_script])
+        
+        # Запускаем основной цикл публикации новостей
+        asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен вручную.")
     except Exception as e:
         logger.critical(f"Глобальная ошибка при запуске бота: {e}", exc_info=True)
+    finally:
+        # При остановке main.py, завершаем и promo_bot.py
+        if promo_process:
+            logger.info("🛑 Остановка фонового процесса promo_bot.py...")
+            promo_process.terminate()
