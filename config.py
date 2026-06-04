@@ -19,7 +19,7 @@ CHANNEL_LINK = "https://t.me/DevilsTraders_Community"
 
 # --- 2. НАСТРОЙКИ API GOOGLE GEMINI ---
 # Укажите ваш API-ключ для доступа к моделям Gemini.
-GEMINI_API_KEY = "AIzaSyAwAIsECfD55A8Wc_Wo7grZLO2l2nCI1tk"
+GEMINI_API_KEY = "AIzaSyAZbYeKSkx2OM50KEzywJ8LnF7KNDyQYYU"
 
 
 # --- 3. ИСТОЧНИКИ НОВОСТЕЙ ---
@@ -85,7 +85,7 @@ IMAGE_SELECTION_PROMPT = """
 
 # --- 5. НАСТРОЙКИ ПЛАНИРОВЩИКА ---
 # Количество постов, которое бот должен публиковать в течение дня.
-POSTS_PER_DAY = 13
+POSTS_PER_DAY = 15
 
 # Часовой пояс, по которому будет работать планировщик.
 TIMEZONE = "Europe/Kyiv"
