@@ -17,9 +17,9 @@ CHANNEL_ID = "@DevilsTraders_Community" # ВАШ КАНАЛ
 CHANNEL_LINK = "https://t.me/DevilsTraders_Community"
 
 
-# --- 2. НАСТРОЙКИ API GOOGLE GEMINI ---
-# Укажите ваш API-ключ для доступа к моделям Gemini.
-GEMINI_API_KEY = "AIzaSyAZbYeKSkx2OM50KEzywJ8LnF7KNDyQYYU"
+# --- 2. НАСТРОЙКИ API GROQ ---
+# Бесплатный API-ключ от console.groq.com
+GROQ_API_KEY = "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"
 
 
 # --- 3. ИСТОЧНИКИ НОВОСТЕЙ ---
