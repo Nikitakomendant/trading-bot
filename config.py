@@ -17,6 +17,7 @@ CHANNEL_ID = "@DevilsTraders_Community" # ВАШ КАНАЛ
 CHANNEL_LINK = "https://t.me/DevilsTraders_Community"
 
 
+
 # --- 2. НАСТРОЙКИ API GROQ ---
 # Бесплатный API-ключ от console.groq.com
 GROQ_API_KEY = "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"
@@ -85,7 +86,7 @@ IMAGE_SELECTION_PROMPT = """
 
 # --- 5. НАСТРОЙКИ ПЛАНИРОВЩИКА ---
 # Количество постов, которое бот должен публиковать в течение дня.
-POSTS_PER_DAY = 17
+POSTS_PER_DAY = 20
 
 # Часовой пояс, по которому будет работать планировщик.
 TIMEZONE = "Europe/Kyiv"
