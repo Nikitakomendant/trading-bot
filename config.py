@@ -20,7 +20,7 @@ CHANNEL_LINK = "https://t.me/DevilsTraders_Community"
 
 # --- 2. НАСТРОЙКИ API GROQ ---
 # Бесплатный API-ключ от console.groq.com
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 
 # --- 3. ИСТОЧНИКИ НОВОСТЕЙ ---
